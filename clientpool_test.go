@@ -34,7 +34,7 @@ func TestGet(t *testing.T) {
 	var maxIdle uint32 = 1
 	var timeoutMs int32 = 5
 	pool := NewChannelClientPool(maxIdle, 0, servers, 0, time.Duration(timeoutMs)*time.Millisecond,
-		func(openedSocket *thrift.TSocket) Client {
+		func(openedSocket thrift.TTransport) Client {
 			transport := transportFactory.GetTransport(openedSocket)
 			return example.NewExampleClientFactory(transport, protocolFactory)
 		},

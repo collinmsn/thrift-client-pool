@@ -35,20 +35,18 @@ type ClientPool interface {
 	Size() int
 }
 
-type ClientFactory func(openedSocket *thrift.TSocket) Client
+type ClientFactory func(openedSocket thrift.TTransport) Client
 
 type ChannelClientPool struct {
-	mu               sync.Mutex
-	clients          chan Client
-	maxIdle          uint32
-	maxOpen          uint32
-	opened           uint32
-	servers          []string
-	connectTimeout   time.Duration
-	readTimeout      time.Duration
-	transportFactory thrift.TTransportFactory
-	protocolFactory  thrift.TProtocolFactory
-	clientFactory    ClientFactory
+	mu             sync.Mutex
+	clients        chan Client
+	maxIdle        uint32
+	maxOpen        uint32
+	opened         uint32
+	servers        []string
+	connectTimeout time.Duration
+	readTimeout    time.Duration
+	clientFactory  ClientFactory
 }
 
 // thrift service client wrapped with pool manage information
