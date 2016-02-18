@@ -8,9 +8,9 @@ import (
 )
 
 // create pool
-pool := thrift_client_pool.NewChannelClientPool(maxIdle, maxOpen, servers, connectTimeout, readTimeout, transportFactory, protocolFactory,
-  func(t thrift.TTransport, f thrift.TProtocolFactory) thrift_client_pool.Client {
-		return example.NewExampleClientFactory(t, f)
+pool := thrift_client_pool.NewChannelClientPool(maxIdle, maxOpen, servers, connectTimeout, readTimeout,
+  func(openedSocket *thrift.TSocket) thrift_client_pool.Client {
+		return example.NewExampleClientFactory(transportFactory.GetTransport(openedSocket), protocolFactory)
   },
 )
 

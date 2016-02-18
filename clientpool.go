@@ -15,6 +15,7 @@ var (
 	ErrPoolClosed                  = errors.New("pool has been closed")
 	ErrPoolMaxOpenReached          = errors.New("pool max open client limit reached")
 	ErrClientMissingTransportField = errors.New("client missing transport field")
+	ErrClientNilTransportField     = errors.New("client transport field is nil")
 )
 
 type Client interface{}
@@ -34,7 +35,7 @@ type ClientPool interface {
 	Size() int
 }
 
-type ClientFactory func(t thrift.TTransport, f thrift.TProtocolFactory) Client
+type ClientFactory func(openedSocket *thrift.TSocket) Client
 
 type ChannelClientPool struct {
 	mu               sync.Mutex
@@ -70,18 +71,15 @@ func (cli *pooledClient) MarkUnusable() {
 	cli.unusable = true
 }
 
-func NewChannelClientPool(maxIdle, maxOpen uint32, servers []string, connectTimeout, readTimeout time.Duration, transportFactory thrift.TTransportFactory, protocolFactory thrift.TProtocolFactory,
-	clientFactory ClientFactory) *ChannelClientPool {
+func NewChannelClientPool(maxIdle, maxOpen uint32, servers []string, connectTimeout, readTimeout time.Duration, clientFactory ClientFactory) *ChannelClientPool {
 	pool := &ChannelClientPool{
-		clients:          make(chan Client, maxIdle),
-		maxIdle:          maxIdle,
-		maxOpen:          maxOpen,
-		servers:          servers,
-		connectTimeout:   connectTimeout,
-		readTimeout:      readTimeout,
-		transportFactory: transportFactory,
-		protocolFactory:  protocolFactory,
-		clientFactory:    clientFactory,
+		clients:        make(chan Client, maxIdle),
+		maxIdle:        maxIdle,
+		maxOpen:        maxOpen,
+		servers:        servers,
+		connectTimeout: connectTimeout,
+		readTimeout:    readTimeout,
+		clientFactory:  clientFactory,
 	}
 	return pool
 }
@@ -174,23 +172,24 @@ func (pool *ChannelClientPool) openClient() (cli Client, err error) {
 		return
 	}
 	socket.SetTimeout(pool.connectTimeout)
-	transport := pool.transportFactory.GetTransport(socket)
-	if err = transport.Open(); err != nil {
+	if err = socket.Open(); err != nil {
 		return
 	}
 	socket.SetTimeout(pool.readTimeout)
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	pool.opened += 1
-	return pool.clientFactory(transport, pool.protocolFactory), nil
+	return pool.clientFactory(socket), nil
 }
 
 func (pool *ChannelClientPool) closeClient(cli Client) (err error) {
 	if cli == nil {
 		return nil
 	}
-	if v := reflect.ValueOf(cli).Elem().FieldByName("Transport"); v.IsNil() {
+	if v := reflect.ValueOf(cli).Elem().FieldByName("Transport"); !v.IsValid() {
 		return ErrClientMissingTransportField
+	} else if v.IsNil() {
+		return ErrClientNilTransportField
 	} else {
 		if transport, ok := v.Interface().(thrift.TTransport); !ok {
 			// should never happen
