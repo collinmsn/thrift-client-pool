@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"time"
 
+	"sync/atomic"
+
 	"git.apache.org/thrift.git/lib/go/thrift"
 )
 
@@ -16,6 +18,7 @@ var (
 	ErrPoolMaxOpenReached          = errors.New("pool max open client limit reached")
 	ErrClientMissingTransportField = errors.New("client missing transport field")
 	ErrClientNilTransportField     = errors.New("client transport field is nil")
+	errNoPooledClient              = errors.New("No pooled client")
 )
 
 type Client interface{}
@@ -38,11 +41,12 @@ type ClientPool interface {
 type ClientFactory func(openedSocket thrift.TTransport) Client
 
 type ChannelClientPool struct {
-	mu             sync.Mutex
-	clients        chan Client
+	mu      sync.Mutex
+	clients chan Client
+
+	opened         uint32
 	maxIdle        uint32
 	maxOpen        uint32
-	opened         uint32
 	servers        []string
 	connectTimeout time.Duration
 	readTimeout    time.Duration
@@ -83,27 +87,14 @@ func NewChannelClientPool(maxIdle, maxOpen uint32, servers []string, connectTime
 }
 
 func (pool *ChannelClientPool) Get() (cli PooledClient, err error) {
-	var (
-		rawCli Client
-		ok     bool
-	)
-	clients := pool.getClients()
-	if clients == nil {
-		return nil, ErrPoolClosed
-	}
-	select {
-	case rawCli, ok = <-clients:
-		if !ok {
-			return nil, ErrPoolClosed
-		}
-	default:
+	rawCli, err := pool.getFromPool()
+	if err == ErrPoolClosed {
+		return nil, err
 	}
 	if rawCli == nil {
-		if pool.maxOpenReached() {
-			return nil, ErrPoolMaxOpenReached
-		}
-		if rawCli, err = pool.openClient(); err != nil {
-			return nil, err
+		rawCli, err = pool.openClient()
+		if err != nil {
+			return
 		}
 	}
 	cli = &pooledClient{
@@ -114,56 +105,66 @@ func (pool *ChannelClientPool) Get() (cli PooledClient, err error) {
 }
 
 func (pool *ChannelClientPool) Close() (err error) {
+	pool.mu.Lock()
 	clients := pool.clients
-	func() {
-		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		pool.clients = nil
-	}()
+	pool.clients = nil
+	pool.mu.Unlock()
 	for {
-		rawCli, ok := <-clients
-		if !ok {
-			break
-		}
-		curErr := pool.closeClient(rawCli)
-		if err == nil {
-			err = curErr
+		select {
+		case rawCli := <-clients:
+			curErr := pool.closeClient(rawCli)
+			if err == nil {
+				err = curErr
+			}
+		default:
+			return
 		}
 	}
-	return
 }
 
 func (pool *ChannelClientPool) Size() int {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
 	return len(pool.clients)
 }
 
-func (pool *ChannelClientPool) getClients() chan Client {
+func (pool *ChannelClientPool) getFromPool() (rawCli Client, err error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	return pool.clients
+	if pool.clients == nil {
+		return nil, ErrPoolClosed
+	}
+	select {
+	case rawCli = <-pool.clients:
+		return
+	default:
+		return nil, errNoPooledClient
+	}
 }
 
 func (pool *ChannelClientPool) closePooledClient(cli *pooledClient) error {
-	if !cli.unusable {
+	if cli.unusable {
+		return pool.closeClient(cli.Client)
+	}
+
+	pool.mu.Lock()
+	if pool.clients != nil {
 		select {
 		case pool.clients <- cli.Client:
-			return nil
+			cli.Client = nil
 		default:
 		}
 	}
+	pool.mu.Unlock()
+
 	return pool.closeClient(cli.Client)
 }
 
-func (pool *ChannelClientPool) maxOpenReached() bool {
-	if pool.maxOpen == 0 {
-		return false
-	}
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	return pool.opened >= pool.maxOpen
-}
-
 func (pool *ChannelClientPool) openClient() (cli Client, err error) {
+	if pool.maxOpen != 0 && atomic.LoadUint32(&pool.opened) >= pool.maxOpen {
+		return nil, ErrPoolMaxOpenReached
+	}
+
 	server := pool.servers[rand.Int()%len(pool.servers)]
 	var socket *thrift.TSocket
 	if socket, err = thrift.NewTSocket(server); err != nil {
@@ -174,9 +175,9 @@ func (pool *ChannelClientPool) openClient() (cli Client, err error) {
 		return
 	}
 	socket.SetTimeout(pool.readTimeout)
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	pool.opened += 1
+	if pool.maxOpen != 0 {
+		atomic.AddUint32(&pool.opened, 1)
+	}
 	return pool.clientFactory(socket), nil
 }
 
@@ -184,18 +185,17 @@ func (pool *ChannelClientPool) closeClient(cli Client) (err error) {
 	if cli == nil {
 		return nil
 	}
+	if pool.maxOpen != 0 {
+		atomic.AddUint32(&pool.opened, ^uint32(0))
+	}
 	if v := reflect.ValueOf(cli).Elem().FieldByName("Transport"); !v.IsValid() {
 		return ErrClientMissingTransportField
 	} else if v.IsNil() {
 		return ErrClientNilTransportField
 	} else {
 		if transport, ok := v.Interface().(thrift.TTransport); !ok {
-			// should never happen
 			panic(v)
 		} else {
-			pool.mu.Lock()
-			defer pool.mu.Unlock()
-			pool.opened -= 1
 			return transport.Close()
 		}
 	}

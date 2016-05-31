@@ -27,7 +27,7 @@ func (h *ExampleHandler) AddTimeout(num1 int32, num2 int32, client_timeout_ms in
 	return num1 + num2, nil
 }
 
-func TestGet(t *testing.T) {
+func TestChannelClientPool_Get(t *testing.T) {
 	servers := []string{
 		serverAddr.String(),
 	}
@@ -68,6 +68,33 @@ func TestGet(t *testing.T) {
 			pooledClient.MarkUnusable()
 		}
 	}()
+}
+
+func TestChannelClientPool_Close(t *testing.T) {
+	servers := []string{
+		serverAddr.String(),
+	}
+	var maxIdle uint32 = 1
+	var timeoutMs int32 = 5
+	pool := NewChannelClientPool(maxIdle, 0, servers, 0, time.Duration(timeoutMs)*time.Millisecond,
+		func(openedSocket thrift.TTransport) Client {
+			transport := transportFactory.GetTransport(openedSocket)
+			return example.NewExampleClientFactory(transport, protocolFactory)
+		},
+	)
+	numClients := 5
+	clients := make([]PooledClient, numClients)
+	for i := 0; i < numClients; i++ {
+		if cli, err := pool.Get(); err != nil {
+			t.Error("get client from pool failed", err)
+		} else {
+			clients[i] = cli
+		}
+	}
+	pool.Close()
+	for _, cli := range clients {
+		cli.Close()
+	}
 }
 
 func TestMain(m *testing.M) {
