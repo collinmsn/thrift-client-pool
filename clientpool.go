@@ -109,17 +109,18 @@ func (pool *ChannelClientPool) Close() (err error) {
 	clients := pool.clients
 	pool.clients = nil
 	pool.mu.Unlock()
-	for {
-		select {
-		case rawCli := <-clients:
-			curErr := pool.closeClient(rawCli)
-			if err == nil {
-				err = curErr
-			}
-		default:
-			return
+	if clients == nil {
+		return
+	}
+
+	close(clients)
+	for client := range clients {
+		curErr := pool.closeClient(client)
+		if err == nil {
+			err = curErr
 		}
 	}
+	return
 }
 
 func (pool *ChannelClientPool) Size() int {
@@ -130,13 +131,18 @@ func (pool *ChannelClientPool) Size() int {
 
 func (pool *ChannelClientPool) getFromPool() (rawCli Client, err error) {
 	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	if pool.clients == nil {
+	clients := pool.clients
+	pool.mu.Unlock()
+	if clients == nil {
 		return nil, ErrPoolClosed
 	}
 	select {
-	case rawCli = <-pool.clients:
-		return
+	case rawCli, ok := <-clients:
+		if !ok {
+			return nil, ErrPoolClosed
+		} else {
+			return rawCli, nil
+		}
 	default:
 		return nil, errNoPooledClient
 	}
@@ -147,15 +153,17 @@ func (pool *ChannelClientPool) closePooledClient(cli *pooledClient) error {
 		return pool.closeClient(cli.Client)
 	}
 
-	pool.mu.Lock()
-	if pool.clients != nil {
-		select {
-		case pool.clients <- cli.Client:
-			cli.Client = nil
-		default:
+	func() {
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		if pool.clients != nil {
+			select {
+			case pool.clients <- cli.Client:
+				cli.Client = nil
+			default:
+			}
 		}
-	}
-	pool.mu.Unlock()
+	}()
 
 	return pool.closeClient(cli.Client)
 }
